@@ -1,0 +1,41 @@
+
+name: Gerar EXE Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compilar programa Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Baixar codigo do projeto
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Instalar dependencias
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Gerar executavel
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "Novel para EPUB" --collect-all ebooklib --collect-all bs4 app.py
+
+      - name: Publicar EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: Novel-para-EPUB-Windows
+          path: dist/Novel para EPUB.exe
+          if-no-files-found: error
+          retention-days: 30
