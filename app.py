@@ -7,7 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 from xml.etree import ElementTree as ET
 
-APP = 'Novel para EPUB v0.1.2 Beta'
+APP = 'Novel para EPUB v0.1.3 Beta'
 HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; NovelParaEPUB/0.1; personal ebook converter)'}
 
 def safe_name(s):
@@ -147,6 +147,7 @@ class App:
     def __init__(self,root):
         self.root=root; root.title(APP); root.geometry('1030x760'); root.minsize(800,600)
         self.chapters=[]; self.events=queue.Queue(); self.cancel=threading.Event(); self.running=False
+        self.active_chapter=None; self.loading_chapter=False; self.saved_snapshot=None; self.project_path=None
         self.title=tk.StringVar(); self.author=tk.StringVar(); self.volume=tk.StringVar(value='1')
         self.genres=tk.StringVar(); self.alternative=tk.StringVar(); self.book_status=tk.StringVar(); self.year=tk.StringVar(); self.clean_titles=tk.BooleanVar(value=True)
         self.cover=tk.StringVar(); self.link=tk.StringVar(); self.start=tk.StringVar(value='1'); self.end=tk.StringVar(value='30'); self.method=tk.StringVar(value='Número na URL')
@@ -185,7 +186,9 @@ class App:
         self.list=tk.Listbox(left,exportselection=False);self.list.pack(fill='both',expand=True);self.list.bind('<<ListboxSelect>>',self.select_chapter)
         ttk.Label(right,text='Título do capítulo').pack(anchor='w');self.chapter_title=tk.StringVar();ttk.Entry(right,textvariable=self.chapter_title).pack(fill='x')
         ttk.Label(right,text='Texto (editável)').pack(anchor='w');self.editor=tk.Text(right,wrap='word',undo=True);self.editor.pack(fill='both',expand=True)
-        ttk.Button(right,text='Salvar edição do capítulo',command=self.save_edit).pack(anchor='e',pady=4)
+        ttk.Button(right,text='Salvar alterações',command=self.save_edit).pack(anchor='e',pady=4)
+        root.protocol("WM_DELETE_WINDOW",self.on_close)
+        self.saved_snapshot=self.snapshot()
         root.after(100,self.poll)
     def choose_cover(self):
         p=filedialog.askopenfilename(filetypes=[('Imagens','*.jpg *.jpeg *.png')]);
@@ -193,14 +196,54 @@ class App:
     def refresh(self):
         self.list.delete(0,'end')
         for i,c in enumerate(self.chapters):self.list.insert('end',f'{i+1:03d} | {c["title"]} | {len(c["text"])} caracteres')
+    def snapshot(self):
+        return json.dumps(self.project(),ensure_ascii=False,sort_keys=True)
+    def commit_active_chapter(self,notify=False):
+        if self.active_chapter is None or self.active_chapter >= len(self.chapters):return
+        i=self.active_chapter
+        title=self.chapter_title.get().strip()
+        body=self.editor.get('1.0','end-1c')
+        changed=(self.chapters[i]['title']!=title or self.chapters[i]['text']!=body)
+        self.chapters[i]['title']=title
+        self.chapters[i]['text']=body
+        if changed:self.refresh()
+        if notify:self.status.set('Alterações do capítulo salvas no projeto em memória. Use Salvar projeto para guardar no disco.')
     def select_chapter(self,event=None):
         sel=self.list.curselection()
         if not sel:return
-        c=self.chapters[sel[0]];self.chapter_title.set(c['title']);self.editor.delete('1.0','end');self.editor.insert('1.0',c['text'])
+        index=sel[0]
+        if index==self.active_chapter:return
+        self.commit_active_chapter()
+        self.active_chapter=index
+        c=self.chapters[index]
+        self.loading_chapter=True
+        self.chapter_title.set(c['title'])
+        self.editor.delete('1.0','end');self.editor.insert('1.0',c['text'])
+        self.loading_chapter=False
+        self.list.selection_clear(0,'end');self.list.selection_set(index)
+        self.list.see(index)
     def save_edit(self):
-        sel=self.list.curselection()
-        if not sel:return
-        i=sel[0];self.chapters[i]['title']=self.chapter_title.get().strip();self.chapters[i]['text']=self.editor.get('1.0','end-1c');self.refresh();self.list.selection_set(i);self.status.set('Capítulo atualizado.')
+        if self.active_chapter is None:
+            messagebox.showinfo('Salvar alterações','Selecione um capítulo primeiro.');return
+        self.commit_active_chapter(notify=True)
+    def clear_active(self):
+        self.active_chapter=None
+        self.chapter_title.set('')
+        self.editor.delete('1.0','end')
+    def has_unsaved_changes(self):
+        self.commit_active_chapter()
+        return self.snapshot()!=self.saved_snapshot
+    def confirm_discard(self):
+        if not self.has_unsaved_changes():return True
+        answer=messagebox.askyesnocancel('Alterações não salvas','O projeto tem alterações não salvas no disco. Deseja salvar antes de continuar?')
+        if answer is None:return False
+        if answer:
+            return self.save_project()
+        return True
+    def on_close(self):
+        if not self.confirm_discard():return
+        if self.running:self.cancel.set()
+        self.root.destroy()
     def import_chapters(self):
         if self.running:return
         try:
@@ -210,7 +253,8 @@ class App:
             if urlparse(url).scheme not in ('http','https') or not urlparse(url).netloc:raise ValueError('Informe uma URL HTTP(S) válida.')
             if not messagebox.askyesno('Confirmar importação','Você tem autorização para importar este conteúdo e o site permite esse acesso?'):return
         except ValueError as e:messagebox.showerror('Dados inválidos',str(e));return
-        self.cancel.clear();self.running=True;self.go.configure(state='disabled');self.chapters=[];self.refresh()
+        if not self.confirm_discard():return
+        self.cancel.clear();self.running=True;self.go.configure(state='disabled');self.chapters=[];self.clear_active();self.refresh()
         threading.Thread(target=self.worker,args=(url,a,b,self.method.get()),daemon=True).start()
     def worker(self,url,a,b,method):
         session=requests.Session();seen=set();base_host=urlparse(url).netloc
@@ -243,20 +287,34 @@ class App:
     def project(self):
         return {'title':self.title.get(),'author':self.author.get(),'volume':self.volume.get(),'cover':self.cover.get(),'synopsis':self.synopsis.get('1.0','end-1c'),'link':self.link.get(),'start':self.start.get(),'end':self.end.get(),'method':self.method.get(),'chapters':self.chapters,'genres':self.genres.get(),'alternative':self.alternative.get(),'book_status':self.book_status.get(),'year':self.year.get(),'clean_titles':self.clean_titles.get()}
     def save_project(self):
-        p=filedialog.asksaveasfilename(defaultextension='.json',filetypes=[('Projeto JSON','*.json')]);
-        if p:Path(p).write_text(json.dumps(self.project(),ensure_ascii=False,indent=2),encoding='utf-8');self.status.set('Projeto salvo.')
+        self.commit_active_chapter()
+        p=self.project_path or filedialog.asksaveasfilename(defaultextension='.json',filetypes=[('Projeto JSON','*.json')])
+        if not p:return False
+        try:
+            payload=self.snapshot()
+            Path(p).write_text(json.dumps(json.loads(payload),ensure_ascii=False,indent=2),encoding='utf-8')
+            self.project_path=p;self.saved_snapshot=payload
+            self.status.set('Projeto salvo: '+p)
+            return True
+        except Exception as e:
+            messagebox.showerror('Erro ao salvar projeto',str(e));return False
     def open_project(self):
+        if self.running:messagebox.showwarning('Aguarde','Finalize a importação antes de abrir um projeto.');return
+        if not self.confirm_discard():return
         p=filedialog.askopenfilename(filetypes=[('Projeto JSON','*.json')]);
         if not p:return
         try:
             d=json.loads(Path(p).read_text(encoding='utf-8'))
+            self.clear_active()
             for key,var in [('title',self.title),('author',self.author),('volume',self.volume),('cover',self.cover),('link',self.link),('start',self.start),('end',self.end),('method',self.method)]:var.set(d.get(key,''))
             self.synopsis.delete('1.0','end');self.synopsis.insert('1.0',d.get('synopsis',''))
             for key,var in [('genres',self.genres),('alternative',self.alternative),('book_status',self.book_status),('year',self.year)]:var.set(d.get(key,''))
             self.clean_titles.set(d.get('clean_titles',True))
-            self.chapters=d.get('chapters',[]);self.refresh();self.status.set('Projeto aberto.')
+            self.chapters=d.get('chapters',[]);self.refresh()
+            self.project_path=p;self.saved_snapshot=self.snapshot();self.status.set('Projeto aberto.')
         except Exception as e:messagebox.showerror('Erro ao abrir',str(e))
     def validate(self):
+        self.commit_active_chapter()
         if not self.chapters:messagebox.showwarning('Verificação','Nenhum capítulo importado.');return
         issues=[];urls=set();texts=set()
         for i,c in enumerate(self.chapters,1):
@@ -267,7 +325,7 @@ class App:
         messagebox.showinfo('Verificação', '\n'.join(issues[:25]) if issues else f'{len(self.chapters)} capítulos sem problemas óbvios. Faça também uma revisão manual.')
     def export(self):
         if self.running:messagebox.showwarning('Aguarde','Finalize a importação antes de exportar.');return
-        self.save_edit()
+        self.commit_active_chapter()
         if not self.title.get().strip() or not self.chapters:messagebox.showwarning('Dados incompletos','Informe o título e importe ao menos um capítulo.');return
         path=filedialog.asksaveasfilename(defaultextension='.epub',initialfile=safe_name(self.title.get()+' - Volume '+self.volume.get())+'.epub',filetypes=[('EPUB','*.epub')])
         if not path:return
