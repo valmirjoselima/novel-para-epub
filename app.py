@@ -7,7 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 from xml.etree import ElementTree as ET
 
-APP = 'Novel para EPUB v0.1.0 Beta'
+APP = 'Novel para EPUB v0.1.2 Beta'
 HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; NovelParaEPUB/0.1; personal ebook converter)'}
 
 def safe_name(s):
@@ -63,57 +63,92 @@ def get_chapter(session, url):
                 break
     return {'title':title, 'text':content, 'url':response.url, 'next':next_url, 'status':'OK'}
 
-def make_epub(path, title, author, description, volume, chapters, cover=None):
-    if not chapters:
-        raise ValueError('Não há capítulos para exportar.')
-    bookid = str(uuid.uuid4())
-    esc = html.escape
-    def xhtml(title_, text):
-        paras = ''.join('<p>'+esc(p).replace('\n','<br/>')+'</p>' for p in text.split('\n\n') if p.strip())
-        return ('<?xml version="1.0" encoding="utf-8"?>'
-                '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>'+esc(title_)+'</title>'
-                '<link rel="stylesheet" type="text/css" href="style.css"/></head><body><h1>'+esc(title_)+'</h1>'+paras+'</body></html>')
+def chapter_short_title(title, text, number):
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    for line in lines[:9]:
+        m = re.match(r'^(?:cap[ií]tulo|cap\.)\s*(\d+)\s*[-—:–]\s*(.{3,100})$', line, re.I)
+        if m and int(m.group(1)) == number:
+            return f'Capítulo {number} — {m.group(2).strip()}'
+    m = re.search(r'cap[ií]tulo\s*\d+\s*[-—:–]\s*(.{3,100})$', title, re.I)
+    if m: return f'Capítulo {number} — {m.group(1).strip()}'
+    return f'Capítulo {number}'
+
+def make_epub(path, title, author, description, volume, chapters, cover=None, genres='', alternative='', status='', year='', clean_titles=True):
+    if not chapters: raise ValueError('Não há capítulos para exportar.')
+    bookid = str(uuid.uuid4()); esc = html.escape
     title_full = title + (' — Volume '+str(volume) if volume else '')
+    def page(heading, body, css=True):
+        style = '<link rel="stylesheet" type="text/css" href="style.css"/>' if css else ''
+        return ('<?xml version="1.0" encoding="utf-8"?>'
+                '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="pt-BR"><head><meta charset="utf-8"/>'
+                '<title>'+esc(heading)+'</title>'+style+'</head><body>'+body+'</body></html>')
+    def paras(text):
+        return ''.join('<p>'+esc(t.strip()).replace('\n','<br/>')+'</p>' for t in re.split(r'\n\s*\n',text) if t.strip())
     manifest = ['<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
-                '<item id="css" href="style.css" media-type="text/css"/>']
-    spine = []
-    for i in range(len(chapters)):
-        manifest.append(f'<item id="c{i}" href="c{i}.xhtml" media-type="application/xhtml+xml"/>')
-        spine.append(f'<itemref idref="c{i}"/>')
-    cover_data, cover_ext, cover_mime = None, None, None
+                '<item id="css" href="style.css" media-type="text/css"/>',
+                '<item id="intro" href="intro.xhtml" media-type="application/xhtml+xml"/>']
+    spine=[]; files={}
+    cover_data=None
     if cover and os.path.isfile(cover):
-        ext = Path(cover).suffix.lower()
+        ext=Path(cover).suffix.lower()
         if ext in ('.jpg','.jpeg','.png'):
-            cover_ext = 'jpg' if ext in ('.jpg','.jpeg') else 'png'
-            cover_mime = 'image/jpeg' if cover_ext == 'jpg' else 'image/png'
-            cover_data = Path(cover).read_bytes()
-            manifest.append(f'<item id="cover" href="cover.{cover_ext}" media-type="{cover_mime}" properties="cover-image"/>')
-    nav_items = ''.join(f'<li><a href="c{i}.xhtml">{esc(ch["title"])}</a></li>' for i,ch in enumerate(chapters))
-    nav = '<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Sumário</title></head><body><nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc" id="toc"><h1>Sumário</h1><ol>'+nav_items+'</ol></nav></body></html>'
-    opf = ('<?xml version="1.0" encoding="utf-8"?>'
-           '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">'
-           '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
-           '<dc:identifier id="bookid">urn:uuid:'+bookid+'</dc:identifier>'
-           '<dc:title>'+esc(title_full)+'</dc:title><dc:creator>'+esc(author or 'Desconhecido')+'</dc:creator>'
-           '<dc:language>pt-BR</dc:language><dc:description>'+esc(description or '')+'</dc:description>'
-           '<meta property="dcterms:modified">'+time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())+'</meta>'
-           '</metadata><manifest>'+''.join(manifest)+'</manifest><spine>'+''.join(spine)+'</spine></package>')
+            ext='png' if ext=='.png' else 'jpg';mime='image/png' if ext=='png' else 'image/jpeg'
+            cover_data=Path(cover).read_bytes()
+            manifest += [f'<item id="cover-image" href="images/cover.{ext}" media-type="{mime}" properties="cover-image"/>',
+                         '<item id="cover-page" href="cover.xhtml" media-type="application/xhtml+xml"/>']
+            spine.append('<itemref idref="cover-page"/>')
+            files['cover.xhtml']=page(title_full,f'<div class="cover"><img src="images/cover.{ext}" alt="{esc(title_full)}"/></div>')
+            files[f'images/cover.{ext}']=cover_data
+    intro='<h1>'+esc(title_full)+'</h1>'
+    for label,value in [('Também conhecido como',alternative),('Gêneros',genres),('Autor(es)',author),('Status',status),('Lançamento',year)]:
+        if value.strip(): intro+=f'<p><strong>{label}:</strong> {esc(value)}</p>'
+    if description.strip():intro+='<h2>Sinopse</h2>'+paras(description)
+    intro+=f'<p><strong>Capítulos:</strong> {len(chapters)}</p>'
+    files['intro.xhtml']=page('Apresentação',intro)
+    spine.append('<itemref idref="intro"/>')
+    nav_items=['<li><a href="intro.xhtml">Apresentação</a></li>']
+    if cover_data:nav_items.insert(0,'<li><a href="cover.xhtml">Capa</a></li>')
+    for i,ch in enumerate(chapters):
+        number=int(ch.get('number',i+1))
+        heading=chapter_short_title(ch['title'],ch['text'],number) if clean_titles else ch['title']
+        text=ch['text']
+        # Evita repetir no corpo o cabeçalho que já aparece no título.
+        lines=text.splitlines()
+        if clean_titles:
+            while lines and not lines[0].strip():lines.pop(0)
+            if lines and re.sub(r'\s+',' ',lines[0]).strip().casefold()==heading.casefold():lines.pop(0)
+            text='\n'.join(lines)
+        fname=f'chapter-{i}.xhtml'
+        files[fname]=page(heading,'<h2>'+esc(heading)+'</h2>'+paras(text))
+        manifest.append(f'<item id="chap-{i}" href="{fname}" media-type="application/xhtml+xml"/>')
+        spine.append(f'<itemref idref="chap-{i}"/>')
+        nav_items.append(f'<li><a href="{fname}">{esc(heading)}</a></li>')
+    nav=('<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml" '
+         'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Sumário</title></head><body>'
+         '<nav epub:type="toc" id="toc"><h1>Sumário</h1><ol>'+''.join(nav_items)+'</ol></nav></body></html>')
+    opf=('<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">'
+         '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+         '<dc:identifier id="bookid">urn:uuid:'+bookid+'</dc:identifier>'
+         '<dc:title>'+esc(title_full)+'</dc:title><dc:creator>'+esc(author or 'Desconhecido')+'</dc:creator>'
+         '<dc:language>pt-BR</dc:language><dc:description>'+esc(description or '')+'</dc:description>'
+         '<meta property="dcterms:modified">'+time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())+'</meta>'
+         '</metadata><manifest>'+''.join(manifest)+'</manifest><spine>'+''.join(spine)+'</spine></package>')
+    css=('body{font-family:serif;line-height:1.55;margin:4%;}p{margin:0 0 .65em;text-align:justify;}'
+         'h1{text-align:center;margin:1em 0;}h2{margin:1.2em 0 .8em;text-align:center;}'
+         '.cover{margin:0;padding:0;text-align:center;page-break-after:always;}'
+         '.cover img{display:block;width:100%;height:auto;max-height:95vh;object-fit:contain;margin:auto;}')
     with zipfile.ZipFile(path,'w') as z:
         z.writestr('mimetype','application/epub+zip',compress_type=zipfile.ZIP_STORED)
         z.writestr('META-INF/container.xml','<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
-        z.writestr('OEBPS/content.opf',opf)
-        z.writestr('OEBPS/nav.xhtml',nav)
-        z.writestr('OEBPS/style.css','body{font-family:serif;line-height:1.6;margin:5%;}p{text-indent:1.3em;margin:0 0 .7em;}h1{text-align:center;margin:1em 0;}')
-        if cover_data:
-            z.writestr('OEBPS/cover.'+cover_ext,cover_data)
-        for i,ch in enumerate(chapters):
-            z.writestr(f'OEBPS/c{i}.xhtml',xhtml(ch['title'],ch['text']))
+        z.writestr('OEBPS/content.opf',opf);z.writestr('OEBPS/nav.xhtml',nav);z.writestr('OEBPS/style.css',css)
+        for name,data in files.items():z.writestr('OEBPS/'+name,data)
 
 class App:
     def __init__(self,root):
         self.root=root; root.title(APP); root.geometry('1030x760'); root.minsize(800,600)
         self.chapters=[]; self.events=queue.Queue(); self.cancel=threading.Event(); self.running=False
         self.title=tk.StringVar(); self.author=tk.StringVar(); self.volume=tk.StringVar(value='1')
+        self.genres=tk.StringVar(); self.alternative=tk.StringVar(); self.book_status=tk.StringVar(); self.year=tk.StringVar(); self.clean_titles=tk.BooleanVar(value=True)
         self.cover=tk.StringVar(); self.link=tk.StringVar(); self.start=tk.StringVar(value='1'); self.end=tk.StringVar(value='30'); self.method=tk.StringVar(value='Número na URL')
         frm=ttk.Frame(root,padding=12); frm.pack(fill='both',expand=True)
         ttk.Label(frm,text=APP,font=('Segoe UI',17,'bold')).pack(anchor='w')
@@ -125,6 +160,9 @@ class App:
         crow=ttk.Frame(info);crow.pack(fill='x',pady=5)
         ttk.Label(crow,text='Capa:').pack(side='left');ttk.Entry(crow,textvariable=self.cover).pack(side='left',fill='x',expand=True,padx=5)
         ttk.Button(crow,text='Selecionar imagem',command=self.choose_cover).pack(side='left')
+        meta=ttk.Frame(info);meta.pack(fill='x',pady=3)
+        for label,var,width in [('Gêneros',self.genres,30),('Nome alternativo',self.alternative,25),('Status',self.book_status,13),('Ano',self.year,8)]:
+            cell=ttk.Frame(meta);cell.pack(side='left',padx=(0,9));ttk.Label(cell,text=label).pack(anchor='w');ttk.Entry(cell,textvariable=var,width=width).pack()
         ttk.Label(info,text='Sinopse').pack(anchor='w');self.synopsis=tk.Text(info,height=3,wrap='word');self.synopsis.pack(fill='x')
         imp=ttk.LabelFrame(frm,text='Importação',padding=9);imp.pack(fill='x',pady=8)
         ttk.Label(imp,text='URL do primeiro capítulo').pack(anchor='w');ttk.Entry(imp,textvariable=self.link).pack(fill='x')
@@ -136,6 +174,11 @@ class App:
         self.go=ttk.Button(opt,text='Importar capítulos',command=self.import_chapters);self.go.pack(side='left',padx=12)
         ttk.Button(opt,text='Parar',command=self.cancel.set).pack(side='left')
         ttk.Label(imp,text='Intervalo entre páginas: 1,5 s. O programa para em erros e não tenta contornar bloqueios.').pack(anchor='w')
+        actions=ttk.Frame(frm);actions.pack(side='bottom',fill='x',pady=5)
+        for text_,cmd in [('Salvar projeto',self.save_project),('Abrir projeto',self.open_project),('Verificar capítulos',self.validate),('Gerar EPUB',self.export)]:
+            ttk.Button(actions,text=text_,command=cmd).pack(side='left',padx=(0,8))
+        self.status=tk.StringVar(value='Pronto.');ttk.Label(frm,textvariable=self.status).pack(side='bottom',anchor='w')
+        ttk.Checkbutton(frm,text='Usar títulos curtos no EPUB (Capítulo 1 — Nome)',variable=self.clean_titles).pack(side='bottom',anchor='w')
         split=ttk.Panedwindow(frm,orient='horizontal');split.pack(fill='both',expand=True,pady=5)
         left=ttk.Frame(split);right=ttk.Frame(split);split.add(left,weight=1);split.add(right,weight=2)
         ttk.Label(left,text='Capítulos (selecione para revisar)').pack(anchor='w')
@@ -143,10 +186,6 @@ class App:
         ttk.Label(right,text='Título do capítulo').pack(anchor='w');self.chapter_title=tk.StringVar();ttk.Entry(right,textvariable=self.chapter_title).pack(fill='x')
         ttk.Label(right,text='Texto (editável)').pack(anchor='w');self.editor=tk.Text(right,wrap='word',undo=True);self.editor.pack(fill='both',expand=True)
         ttk.Button(right,text='Salvar edição do capítulo',command=self.save_edit).pack(anchor='e',pady=4)
-        actions=ttk.Frame(frm);actions.pack(fill='x',pady=6)
-        for text_,cmd in [('Salvar projeto',self.save_project),('Abrir projeto',self.open_project),('Verificar capítulos',self.validate),('Gerar EPUB',self.export)]:
-            ttk.Button(actions,text=text_,command=cmd).pack(side='left',padx=(0,8))
-        self.status=tk.StringVar(value='Pronto.');ttk.Label(frm,textvariable=self.status).pack(anchor='w')
         root.after(100,self.poll)
     def choose_cover(self):
         p=filedialog.askopenfilename(filetypes=[('Imagens','*.jpg *.jpeg *.png')]);
@@ -186,7 +225,7 @@ class App:
                 if method=='Link próximo capítulo':
                     if not chapter['next'] and n<b:raise ValueError('Não foi encontrado o link do próximo capítulo.')
                     url=chapter['next']
-                self.events.put(('chapter',chapter))
+                chapter['number']=n;self.events.put(('chapter',chapter))
                 if n<b and not self.cancel.is_set():time.sleep(1.5)
             self.events.put(('status','Importação concluída ou interrompida. Revise os capítulos antes de exportar.'))
         except Exception as e:self.events.put(('error',str(e)))
@@ -202,7 +241,7 @@ class App:
         except queue.Empty:pass
         self.root.after(100,self.poll)
     def project(self):
-        return {'title':self.title.get(),'author':self.author.get(),'volume':self.volume.get(),'cover':self.cover.get(),'synopsis':self.synopsis.get('1.0','end-1c'),'link':self.link.get(),'start':self.start.get(),'end':self.end.get(),'method':self.method.get(),'chapters':self.chapters}
+        return {'title':self.title.get(),'author':self.author.get(),'volume':self.volume.get(),'cover':self.cover.get(),'synopsis':self.synopsis.get('1.0','end-1c'),'link':self.link.get(),'start':self.start.get(),'end':self.end.get(),'method':self.method.get(),'chapters':self.chapters,'genres':self.genres.get(),'alternative':self.alternative.get(),'book_status':self.book_status.get(),'year':self.year.get(),'clean_titles':self.clean_titles.get()}
     def save_project(self):
         p=filedialog.asksaveasfilename(defaultextension='.json',filetypes=[('Projeto JSON','*.json')]);
         if p:Path(p).write_text(json.dumps(self.project(),ensure_ascii=False,indent=2),encoding='utf-8');self.status.set('Projeto salvo.')
@@ -213,6 +252,8 @@ class App:
             d=json.loads(Path(p).read_text(encoding='utf-8'))
             for key,var in [('title',self.title),('author',self.author),('volume',self.volume),('cover',self.cover),('link',self.link),('start',self.start),('end',self.end),('method',self.method)]:var.set(d.get(key,''))
             self.synopsis.delete('1.0','end');self.synopsis.insert('1.0',d.get('synopsis',''))
+            for key,var in [('genres',self.genres),('alternative',self.alternative),('book_status',self.book_status),('year',self.year)]:var.set(d.get(key,''))
+            self.clean_titles.set(d.get('clean_titles',True))
             self.chapters=d.get('chapters',[]);self.refresh();self.status.set('Projeto aberto.')
         except Exception as e:messagebox.showerror('Erro ao abrir',str(e))
     def validate(self):
@@ -231,7 +272,7 @@ class App:
         path=filedialog.asksaveasfilename(defaultextension='.epub',initialfile=safe_name(self.title.get()+' - Volume '+self.volume.get())+'.epub',filetypes=[('EPUB','*.epub')])
         if not path:return
         try:
-            make_epub(path,self.title.get(),self.author.get(),self.synopsis.get('1.0','end-1c'),self.volume.get(),self.chapters,self.cover.get())
+            make_epub(path,self.title.get(),self.author.get(),self.synopsis.get('1.0','end-1c'),self.volume.get(),self.chapters,self.cover.get(),self.genres.get(),self.alternative.get(),self.book_status.get(),self.year.get(),self.clean_titles.get())
             self.status.set('EPUB gerado: '+path);messagebox.showinfo('Concluído','EPUB gerado com sucesso!')
         except Exception as e:messagebox.showerror('Erro ao gerar EPUB',str(e))
 
