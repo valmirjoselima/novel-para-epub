@@ -1,0 +1,34 @@
+NOVEL PARA EPUB - COMPILACAO AUTOMATICA NO GITHUB
+
+Voce NAO precisa instalar Python no seu computador.
+
+PASSO A PASSO:
+1. Acesse https://github.com/new e entre em sua conta.
+2. Crie um repositorio PRIVADO vazio, por exemplo: novel-para-epub.
+   (Nao marque opcao para criar README ou .gitignore.)
+3. Abra o repositorio, clique em "uploading an existing file" ou
+   Add file > Upload files.
+4. Envie app.py, requirements.txt e GERAR_EXE_WINDOWS.bat.
+5. MUITO IMPORTANTE: o arquivo do fluxo deve estar no caminho exato
+   .github/workflows/gerar-exe-windows.yml
+   Como a interface web pode nao preservar pastas ao enviar arquivos,
+   crie este arquivo usando Add file > Create new file e digite o caminho
+   .github/workflows/gerar-exe-windows.yml
+   Depois copie o conteudo do arquivo correspondente do ZIP.
+6. Clique Commit changes para salvar.
+7. Abra a aba Actions, selecione "Gerar EXE Windows".
+8. Clique Run workflow > Run workflow e aguarde a marca verde.
+9. Abra a execucao concluida. Em Artifacts, clique
+   "Novel-para-EPUB-Windows" para baixar um ZIP com o EXE.
+10. Extraia o ZIP e execute "Novel para EPUB.exe".
+
+OBSERVACOES:
+- Este ZIP contem CODIGO-FONTE e a configuracao de compilacao,
+  NAO contem o EXE pronto.
+- O GitHub pode pedir para habilitar Actions no repositorio.
+- O EXE nao e assinado digitalmente; o Windows pode exibir alerta.
+  Verifique a origem do arquivo antes de executa-lo.
+- O app precisa de internet para importar capitulos; a edicao e a
+  geracao do EPUB funcionam localmente.
+- Importe apenas obras que voce tem permissao para converter.
+- A extracao e generica e pode exigir revisao dos capitulos.
